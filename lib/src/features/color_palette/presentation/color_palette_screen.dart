@@ -41,9 +41,6 @@ class _ColorMath {
   static Color withLightness(Color c, double l) =>
       fromHsl(toHsl(c).withLightness(l.clamp(0.0, 1.0)));
 
-  static Color withSaturation(Color c, double s) =>
-      fromHsl(toHsl(c).withSaturation(s.clamp(0.0, 1.0)));
-
   /// WCAG contrast ratio
   static double contrast(Color a, Color b) {
     final la = _lum(a);
@@ -197,7 +194,6 @@ class _ColorPaletteScreenState extends ConsumerState<ColorPaletteScreen> {
   static const _bg = Color(0xFF0A0A0A);
   static const _surface = Color(0xFF111111);
   static const _border = Color(0xFF1F1F1F);
-  static const _accent = Color(0xFF6366F1);
 
   final TextEditingController _hexController = TextEditingController(text: '#6366F1');
 

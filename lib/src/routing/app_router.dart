@@ -9,10 +9,14 @@ import '../features/widget_generator/presentation/widget_generator_screen.dart';
 import '../features/theme_builder/presentation/theme_generator_screen.dart';
 import '../features/json_model/presentation/json_model_screen.dart';
 import '../features/color_palette/presentation/color_palette_screen.dart';
+import '../features/snippets/presentation/snippets_screen.dart';
+import '../features/icon_browser/presentation/icon_browser_screen.dart';
+import '../features/pubspec_manager/presentation/pubspec_manager_screen.dart';
+import '../features/ui_builder/presentation/ui_builder_screen.dart';
 
 part 'app_router.g.dart';
 
-enum AppRoute { home, audit, blog, post, widgetGenerator, themeBuilder, jsonModel, colorPalette }
+enum AppRoute { home, audit, blog, post, widgetGenerator, themeBuilder, jsonModel, colorPalette, snippets, iconBrowser, pubspecManager, uiBuilder }
 
 @riverpod
 GoRouter goRouter(GoRouterRef ref) {
@@ -67,6 +71,26 @@ GoRouter goRouter(GoRouterRef ref) {
             path: 'color-palette',
             name: AppRoute.colorPalette.name,
             builder: (context, state) => const ColorPaletteScreen(),
+          ),
+          GoRoute(
+            path: 'snippets',
+            name: AppRoute.snippets.name,
+            builder: (context, state) => const SnippetsScreen(),
+          ),
+          GoRoute(
+            path: 'icon-browser',
+            name: AppRoute.iconBrowser.name,
+            builder: (context, state) => const IconBrowserScreen(),
+          ),
+          GoRoute(
+            path: 'pubspec-manager',
+            name: AppRoute.pubspecManager.name,
+            builder: (context, state) => const PubspecManagerScreen(),
+          ),
+          GoRoute(
+            path: 'ui-builder',
+            name: AppRoute.uiBuilder.name,
+            builder: (context, state) => const UiBuilderScreen(),
           ),
         ],
       ),
