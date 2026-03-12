@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:lucide_icons/lucide_icons.dart';
+import 'package:url_launcher/url_launcher.dart';
+import '../data/pub_repository.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Domain
@@ -14,6 +16,8 @@ class PubDependency {
     this.isDev = false,
     this.url,
     this.description = '',
+    this.metrics,
+    this.dartSdkConstraint,
   });
 
   final String name;
@@ -21,6 +25,8 @@ class PubDependency {
   final bool isDev;
   final String? url;
   String description;
+  PubPackageMetrics? metrics; // Added for Feature 1
+  String? dartSdkConstraint; // Added for Feature 3
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -28,19 +34,26 @@ class PubDependency {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class PopularPackage {
-  const PopularPackage({
+  PopularPackage({
     required this.name,
     required this.latestVersion,
     required this.description,
     required this.category,
+    this.repository,
+    this.homepage,
+    this.documentation,
   });
   final String name;
   final String latestVersion;
   final String description;
   final String category;
+  PubPackageMetrics? metrics; // Added for Feature 1
+  final String? repository;
+  final String? homepage;
+  final String? documentation;
 }
 
-const _popularPackages = <PopularPackage>[
+final _popularPackages = <PopularPackage>[
   // State
   PopularPackage(name: 'flutter_riverpod', latestVersion: '^2.6.1', description: 'Reactive state management', category: 'State'),
   PopularPackage(name: 'riverpod_annotation', latestVersion: '^2.6.1', description: 'Annotations for Riverpod code gen', category: 'State'),
@@ -101,6 +114,7 @@ class _PubspecManagerScreenState extends State<PubspecManagerScreen>
   static const _border = Color(0xFF1F1F1F);
   static const _accent = Color(0xFF06B6D4);
 
+  final _pubRepo = PubRepository();
   late final TabController _tabCtrl;
 
   final List<PubDependency> _deps = [];
@@ -111,6 +125,9 @@ class _PubspecManagerScreenState extends State<PubspecManagerScreen>
 
   final _nameCtrl = TextEditingController();
   final _versionCtrl = TextEditingController();
+  bool _isAdding = false;
+  bool _isSearching = false;
+  List<PopularPackage> _onlineResults = [];
 
   @override
   void initState() {
@@ -129,6 +146,10 @@ class _PubspecManagerScreenState extends State<PubspecManagerScreen>
       PubDependency(name: 'build_runner', version: '^2.4.14', isDev: true, description: 'Code generation runner'),
       PubDependency(name: 'flutter_lints', version: '^5.0.0', isDev: true, description: 'Lint rules'),
     ]);
+    
+    // Fetch metrics for default packages
+    for (var d in _deps) _fetchMetricsInBg(d.name, false);
+    for (var d in _devDeps) _fetchMetricsInBg(d.name, true);
   }
 
   @override
@@ -163,6 +184,13 @@ class _PubspecManagerScreenState extends State<PubspecManagerScreen>
           ],
         ),
         actions: [
+          TextButton.icon(
+            onPressed: _analyzeDependencies,
+            icon: const Icon(LucideIcons.activity, size: 14),
+            label: Text('Analyze', style: GoogleFonts.inter(fontSize: 12)),
+            style: TextButton.styleFrom(foregroundColor: Colors.orangeAccent),
+          ),
+          const SizedBox(width: 8),
           TextButton.icon(
             onPressed: _copyYaml,
             icon: const Icon(LucideIcons.copy, size: 14),
@@ -207,10 +235,78 @@ class _PubspecManagerScreenState extends State<PubspecManagerScreen>
             children: [
               Expanded(
                 flex: 3,
-                child: TextField(
-                  controller: _nameCtrl,
-                  style: GoogleFonts.robotoMono(color: Colors.white, fontSize: 13),
-                  decoration: _inputDec('Package name', LucideIcons.package),
+                child: LayoutBuilder(
+                  builder: (context, constraints) => Autocomplete<String>(
+                    optionsBuilder: (textEditingValue) async {
+                      if (textEditingValue.text.length < 2) return const [];
+                      return await _pubRepo.searchPackages(textEditingValue.text);
+                    },
+                    onSelected: (String selection) {
+                      _nameCtrl.text = selection;
+                      _versionCtrl.text = ''; // Auto-fetch latest version on Add
+                    },
+                    fieldViewBuilder: (context, controller, focusNode, onFieldSubmitted) {
+                      _nameCtrl.addListener(() {
+                        if (_nameCtrl.text.isEmpty && controller.text.isNotEmpty) {
+                          controller.text = '';
+                        }
+                      });
+                      controller.addListener(() {
+                        if (_nameCtrl.text != controller.text) {
+                          _nameCtrl.text = controller.text;
+                        }
+                      });
+                      
+                      return TextField(
+                        controller: controller,
+                        focusNode: focusNode,
+                        style: GoogleFonts.robotoMono(color: Colors.white, fontSize: 13),
+                        decoration: _inputDec('Package name (search pub.dev)', LucideIcons.search),
+                        onSubmitted: (_) => onFieldSubmitted(),
+                      );
+                    },
+                    optionsViewBuilder: (context, onSelected, options) {
+                      return Align(
+                        alignment: Alignment.topLeft,
+                        child: Material(
+                          color: _surface,
+                          elevation: 10,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            side: const BorderSide(color: _border),
+                          ),
+                          child: ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxHeight: 250,
+                              maxWidth: constraints.maxWidth,
+                            ),
+                            child: ListView.separated(
+                              padding: EdgeInsets.zero,
+                              shrinkWrap: true,
+                              itemCount: options.length,
+                              separatorBuilder: (_, __) => const Divider(color: _border, height: 1),
+                              itemBuilder: (context, index) {
+                                final option = options.elementAt(index);
+                                return InkWell(
+                                  onTap: () => onSelected(option),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                                    child: Row(
+                                      children: [
+                                        const Icon(LucideIcons.package, size: 14, color: _accent),
+                                        const SizedBox(width: 10),
+                                        Text(option, style: GoogleFonts.robotoMono(color: Colors.white, fontSize: 13)),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
                 ),
               ),
               const SizedBox(width: 10),
@@ -224,9 +320,11 @@ class _PubspecManagerScreenState extends State<PubspecManagerScreen>
               ),
               const SizedBox(width: 10),
               ElevatedButton.icon(
-                onPressed: () => _addPackage(list, isDev: isDev),
-                icon: const Icon(Icons.add, size: 16),
-                label: Text('Add', style: GoogleFonts.inter(fontWeight: FontWeight.w600)),
+                onPressed: _isAdding ? null : () => _addPackage(list, isDev: isDev),
+                icon: _isAdding 
+                  ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white70))
+                  : const Icon(Icons.add, size: 16),
+                label: Text(_isAdding ? 'Adding...' : 'Add', style: GoogleFonts.inter(fontWeight: FontWeight.w600)),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: _accent,
                   foregroundColor: Colors.white,
@@ -290,6 +388,23 @@ class _PubspecManagerScreenState extends State<PubspecManagerScreen>
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
+          // Metrics (if available)
+          if (dep.metrics != null) ...[
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(color: _accent.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(4)),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.thumb_up_alt_rounded, size: 10, color: _accent),
+                  const SizedBox(width: 4),
+                  Text('${dep.metrics!.likes}', style: GoogleFonts.inter(fontSize: 10, color: _accent, fontWeight: FontWeight.bold)),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+          ],
+          
           // Version badge (editable)
           GestureDetector(
             onTap: () => _editVersion(list, i),
@@ -300,7 +415,7 @@ class _PubspecManagerScreenState extends State<PubspecManagerScreen>
                 borderRadius: BorderRadius.circular(6),
                 border: Border.all(color: Colors.white12),
               ),
-              child: Text(dep.version,
+              child: Text(dep.version.isEmpty ? 'any' : dep.version,
                   style: GoogleFonts.robotoMono(fontSize: 12, color: Colors.white70)),
             ),
           ),
@@ -328,15 +443,31 @@ class _PubspecManagerScreenState extends State<PubspecManagerScreen>
 
   // ── Package catalog ────────────────────────────────────────────────────────
   Widget _buildCatalog() {
-    final cats = ['All', ..._popularPackages.map((p) => p.category).toSet().toList()..sort()];
-    final filtered = _popularPackages.where((p) {
-      final matchCat = _catalogCat == 'All' || p.category == _catalogCat;
-      final q = _search.toLowerCase();
-      final matchQ = q.isEmpty ||
-          p.name.toLowerCase().contains(q) ||
-          p.description.toLowerCase().contains(q);
-      return matchCat && matchQ;
-    }).toList();
+    final cats = [
+      'All', 
+      'Pub.dev Search', 
+      'Flutter Favorites',
+      'Most Liked',
+      ..._popularPackages.map((p) => p.category).toSet().toList()..sort()
+    ];
+    
+    final bool isOnlineCat = _catalogCat == 'Pub.dev Search' || 
+                             _catalogCat == 'Flutter Favorites' || 
+                             _catalogCat == 'Most Liked';
+
+    final List<PopularPackage> displayList;
+    if (isOnlineCat) {
+      displayList = _onlineResults;
+    } else {
+      displayList = _popularPackages.where((p) {
+        final matchCat = _catalogCat == 'All' || p.category == _catalogCat;
+        final q = _search.toLowerCase();
+        final matchQ = q.isEmpty ||
+            p.name.toLowerCase().contains(q) ||
+            p.description.toLowerCase().contains(q);
+        return matchCat && matchQ;
+      }).toList();
+    }
 
     return Column(
       children: [
@@ -347,9 +478,17 @@ class _PubspecManagerScreenState extends State<PubspecManagerScreen>
           child: Column(
             children: [
               TextField(
-                onChanged: (v) => setState(() => _search = v),
+                onChanged: (v) {
+                  setState(() => _search = v);
+                  if (_catalogCat == 'Pub.dev Search') {
+                    _fetchOnlineCategory('Pub.dev Search', query: v);
+                  }
+                },
                 style: GoogleFonts.inter(color: Colors.white, fontSize: 13),
-                decoration: _inputDec('Search packages…', Icons.search),
+                decoration: _inputDec(
+                  isOnlineCat ? 'Search pub.dev registry…' : 'Search curated packages…', 
+                  Icons.search
+                ),
               ),
               const SizedBox(height: 10),
               SizedBox(
@@ -359,7 +498,17 @@ class _PubspecManagerScreenState extends State<PubspecManagerScreen>
                   children: cats.map((cat) {
                     final active = _catalogCat == cat;
                     return GestureDetector(
-                      onTap: () => setState(() => _catalogCat = cat),
+                      onTap: () {
+                        setState(() {
+                          _catalogCat = cat;
+                          _search = ''; // reset search string
+                        });
+                        if (cat == 'Flutter Favorites' || cat == 'Most Liked') {
+                          _fetchOnlineCategory(cat);
+                        } else if (cat == 'Pub.dev Search') {
+                          setState(() => _onlineResults = []);
+                        }
+                      },
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 150),
                         margin: const EdgeInsets.only(right: 8),
@@ -384,13 +533,27 @@ class _PubspecManagerScreenState extends State<PubspecManagerScreen>
           ),
         ),
         Container(height: 1, color: _border),
-        Expanded(
-          child: ListView.separated(
-            padding: const EdgeInsets.all(16),
-            itemCount: filtered.length,
-            separatorBuilder: (_, __) => Container(height: 1, color: _border),
-            itemBuilder: (_, i) {
-              final pkg = filtered[i];
+        if (_isSearching)
+          const Expanded(child: Center(child: CircularProgressIndicator(color: _accent)))
+        else if (isOnlineCat && _onlineResults.isEmpty)
+           Expanded(
+             child: Center(
+               child: Text(
+                 _catalogCat == 'Pub.dev Search' 
+                   ? (_search.isEmpty ? 'Type to search pub.dev packages...' : 'No results on pub.dev for "$_search"')
+                   : 'Fetching $_catalogCat...', 
+                 style: GoogleFonts.inter(color: Colors.white24)
+               )
+             )
+           )
+        else
+          Expanded(
+            child: ListView.separated(
+              padding: const EdgeInsets.all(16),
+              itemCount: displayList.length,
+              separatorBuilder: (_, __) => Container(height: 1, color: _border),
+              itemBuilder: (_, i) {
+                final pkg = displayList[i];
               final alreadyAdded = _deps.any((d) => d.name == pkg.name) ||
                   _devDeps.any((d) => d.name == pkg.name);
               return ListTile(
@@ -419,10 +582,30 @@ class _PubspecManagerScreenState extends State<PubspecManagerScreen>
                           style: GoogleFonts.inter(
                               fontSize: 9, color: _categoryColor(pkg.category))),
                     ),
+                    if (pkg.metrics != null) ...[
+                      const SizedBox(width: 8),
+                      _buildPlatformBadges(pkg.metrics!),
+                    ],
                   ],
                 ),
-                subtitle: Text(pkg.description,
-                    style: GoogleFonts.inter(fontSize: 11, color: Colors.white38)),
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 2),
+                    Text(pkg.description,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: GoogleFonts.inter(fontSize: 11, color: Colors.white38)),
+                    if (pkg.metrics != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          '${pkg.metrics!.points}/${pkg.metrics!.maxPoints} Pub Points • ${pkg.metrics!.likes} Likes',
+                          style: GoogleFonts.inter(fontSize: 10, color: _accent.withValues(alpha: 0.8)),
+                        ),
+                      ),
+                  ],
+                ),
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -476,6 +659,38 @@ class _PubspecManagerScreenState extends State<PubspecManagerScreen>
                             ),
                             child: Text('+ Add', style: GoogleFonts.inter(fontSize: 12)),
                           ),
+                    const SizedBox(width: 8),
+                    // Links
+                    if (pkg.repository != null || pkg.homepage != null || pkg.documentation != null)
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (pkg.documentation != null)
+                            IconButton(
+                              icon: const Icon(LucideIcons.fileText, size: 16, color: Colors.white54),
+                              onPressed: () => _launchUrl(pkg.documentation!),
+                              tooltip: 'Documentation',
+                              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                              padding: EdgeInsets.zero,
+                            )
+                          else if (pkg.homepage != null)
+                            IconButton(
+                              icon: const Icon(LucideIcons.globe, size: 16, color: Colors.white54),
+                              onPressed: () => _launchUrl(pkg.homepage!),
+                              tooltip: 'Homepage',
+                              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                              padding: EdgeInsets.zero,
+                            ),
+                          if (pkg.repository != null)
+                            IconButton(
+                              icon: const Icon(LucideIcons.github, size: 16, color: Colors.white54),
+                              onPressed: () => _launchUrl(pkg.repository!),
+                              tooltip: 'Repository',
+                              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                              padding: EdgeInsets.zero,
+                            ),
+                        ],
+                      ),
                   ],
                 ),
               );
@@ -487,20 +702,130 @@ class _PubspecManagerScreenState extends State<PubspecManagerScreen>
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
-  void _addPackage(List<PubDependency> list, {required bool isDev}) {
+  Future<void> _addPackage(List<PubDependency> list, {required bool isDev}) async {
     final name = _nameCtrl.text.trim();
-    final version = _versionCtrl.text.trim();
+    String version = _versionCtrl.text.trim();
     if (name.isEmpty) return;
+
+    setState(() => _isAdding = true);
+
+    if (version.isEmpty) {
+      final info = await _pubRepo.getPackageInfo(name);
+      if (info != null) {
+        version = '^${info.version}';
+        
+        // Optimistically prefetch metrics to show on the dependency list immediately
+        final metrics = await _pubRepo.getPackageMetrics(name);
+        
+        setState(() {
+          list.add(PubDependency(
+            name: name,
+            version: version,
+            isDev: isDev,
+            metrics: metrics,
+            dartSdkConstraint: info.dartSdkConstraint,
+          ));
+          _isAdding = false;
+        });
+        
+        _nameCtrl.clear();
+        _versionCtrl.clear();
+        _snack('Added $name');
+        return;
+      } else {
+        version = 'any';
+      }
+    }
+
     setState(() {
       list.add(PubDependency(
         name: name,
-        version: version.isEmpty ? 'any' : version,
+        version: version,
         isDev: isDev,
       ));
+      _isAdding = false;
     });
+    
+    // Kick off a background fetch for metrics if we didn't wait for it
+    _fetchMetricsInBg(name, isDev);
+
     _nameCtrl.clear();
     _versionCtrl.clear();
     _snack('Added $name');
+  }
+
+  Future<void> _fetchMetricsInBg(String name, bool isDev) async {
+    final metrics = await _pubRepo.getPackageMetrics(name);
+    if (metrics != null && mounted) {
+      setState(() {
+        final collection = isDev ? _devDeps : _deps;
+        final idx = collection.indexWhere((d) => d.name == name);
+        if (idx != -1) {
+          collection[idx].metrics = metrics;
+        }
+      });
+    }
+  }
+
+  Future<void> _fetchOnlineCategory(String category, {String? query}) async {
+    if (category == 'Pub.dev Search' && (query ?? '').length < 2) {
+      setState(() {
+        _onlineResults = [];
+        _isSearching = false;
+      });
+      return;
+    }
+
+    setState(() {
+      _isSearching = true;
+      if (category != 'Pub.dev Search') _onlineResults = [];
+    });
+
+    try {
+      List<String> names = [];
+      if (category == 'Pub.dev Search') {
+        names = await _pubRepo.searchPackages(query!);
+      } else if (category == 'Flutter Favorites') {
+        names = await _pubRepo.getFlutterFavorites();
+      } else if (category == 'Most Liked') {
+        names = await _pubRepo.getTopPackages();
+      }
+      
+      // Limit to 15 for performance and fetch in parallel
+      final infoFutures = names.take(15).map((name) => _pubRepo.getPackageInfo(name));
+      final metricsFutures = names.take(15).map((name) => _pubRepo.getPackageMetrics(name));
+      
+      final infos = await Future.wait(infoFutures);
+      final metrics = await Future.wait(metricsFutures);
+      
+      final List<PopularPackage> results = [];
+      for (int k = 0; k < infos.length; k++) {
+        final info = infos[k];
+        if (info != null) {
+          results.add(PopularPackage(
+            name: info.name,
+            latestVersion: info.version,
+            description: info.description,
+            category: category == 'Pub.dev Search' ? 'Search' : category,
+            repository: info.repository,
+            homepage: info.homepage,
+            documentation: info.documentation,
+          )..metrics = metrics[k]);
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          // If user switched tabs during fetch, don't overwrite
+          if (_catalogCat == category) {
+            _onlineResults = results;
+          }
+          _isSearching = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isSearching = false);
+    }
   }
 
   void _editVersion(List<PubDependency> list, int i) {
@@ -556,6 +881,100 @@ class _PubspecManagerScreenState extends State<PubspecManagerScreen>
   void _copyYaml() {
     Clipboard.setData(ClipboardData(text: _generateYaml()));
     _snack('pubspec.yaml snippet copied!');
+  }
+
+  Future<void> _launchUrl(String urlString) async {
+    final uri = Uri.parse(urlString);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } else {
+      _snack('Could not open $urlString');
+    }
+  }
+
+  // ── Modals / Dialogs ───────────────────────────────────────────────────────
+
+  void _analyzeDependencies() {
+    // Collect all constraints
+    final allDeps = [..._deps, ..._devDeps];
+    if (allDeps.isEmpty) {
+      _snack('No dependencies to analyze');
+      return;
+    }
+
+    // A simple mock calculation for now: finding common Dart SDK constraints
+    String analysis = 'Everything looks good!';
+    IconData icon = Icons.check_circle_outline;
+    Color iconColor = Colors.green;
+
+    final List<String> conflicting = [];
+    String baseSdk = allDeps.first.dartSdkConstraint ?? 'mixed';
+    
+    for (var dep in allDeps) {
+      if (dep.dartSdkConstraint != null && dep.dartSdkConstraint != baseSdk && baseSdk != 'mixed') {
+        conflicting.add(dep.name);
+      }
+    }
+
+    if (conflicting.isNotEmpty) {
+      analysis = 'Potential SDK Conflict detecting involving: \n\n${conflicting.join(", ")}\n\nCheck pub.dev to ensure they use compatible Dart versions.';
+      icon = Icons.warning_amber_rounded;
+      iconColor = Colors.orange;
+    }
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: _surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            Icon(LucideIcons.activity, color: _accent, size: 20),
+            const SizedBox(width: 10),
+            Text('Dependency Analysis', style: GoogleFonts.inter(color: Colors.white, fontSize: 16)),
+          ],
+        ),
+        content: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, color: iconColor, size: 48),
+              const SizedBox(height: 16),
+              Text(
+                analysis,
+                textAlign: TextAlign.center,
+                style: GoogleFonts.inter(color: Colors.white70, fontSize: 14, height: 1.5),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context),
+            style: ElevatedButton.styleFrom(backgroundColor: _accent),
+            child: const Text('Close', style: TextStyle(color: Colors.white)),
+          )
+        ],
+      ),
+    );
+  }
+
+  // ── Widgets ────────────────────────────────────────────────────────────────
+  
+  Widget _buildPlatformBadges(PubPackageMetrics metrics) {
+    if (!metrics.supportsWeb && !metrics.supportsIos && !metrics.supportsAndroid) return const SizedBox();
+    
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (metrics.supportsAndroid) const Icon(Icons.android, size: 12, color: Colors.white54),
+        if (metrics.supportsIos) const Padding(padding: EdgeInsets.only(left: 4), child: Icon(Icons.apple, size: 12, color: Colors.white54)),
+        if (metrics.supportsWeb) const Padding(padding: EdgeInsets.only(left: 4), child: Icon(Icons.language, size: 12, color: Colors.white54)),
+        if (metrics.supportsWindows || metrics.supportsMacOs || metrics.supportsLinux) 
+          const Padding(padding: EdgeInsets.only(left: 4), child: Icon(Icons.desktop_windows, size: 12, color: Colors.white54)),
+      ],
+    );
   }
 
   void _snack(String msg) {
